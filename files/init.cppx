@@ -1,0 +1,227 @@
+#include <iostream>
+#include <iomanip>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <cmath>
+using namespace std;
+
+#include "../utils/cuda_vector_math.cuh"
+#include "../utils/cuda_device.h"
+#include "../utils/simple_io.h"
+
+#include "../headers/init.h"
+#include "../headers/globals.h"
+#include "../headers/particles.h"
+//#include "altruism.h"
+
+#define PP_SEED 777
+
+//void launch_rngStateSetup_kernel(int * rng_blockSeeds, curandState * rngStates);
+
+//extern cudaError __host__ copyParams(SimParams *s);
+
+int initStateArrays(){
+
+	// UPDATE SIMPARAMS BEFORE CALLING THIS FUNCTION
+//	cudaMemcpy( dev_params, &host_params, sizeof(SimParams), cudaMemcpyHostToDevice);
+//	cudaMemcpyToSymbol(&params, &host_params, sizeof(SimParams));
+//	copyParams(&host_params);
+
+
+	// ~~~~~~~~~~~~~~ CPU random generator (MT) ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//	curandCreateGeneratorHost(&generator_host, CURAND_RNG_PSEUDO_MTGP32);
+//	curandSetPseudoRandomGeneratorSeed(generator_host, PP_SEED);	// seed by time in every expt
+
+	// ~~~~~~~~~~~~~~ GPU random generator (XORWOW) ~~~~~~~~~~~~~~~~~~~~~~~
+//	srand(PP_SEED);
+//	for (int i=0; i<nFish; ++i) seeds_h[i] = rand(); 
+//	cudaMemcpy( seeds_dev, seeds_h, sizeof(int)*nFish, cudaMemcpyHostToDevice);
+//	launch_rngStateSetup_kernel(seeds_dev, dev_XWstates);
+//	getLastCudaError("RNG_kernel_launch");
+
+
+//	//init files for output
+//	if (dataOut){
+//		// get expt desc including block details
+//		stringstream sout;
+//		sout << setprecision(3) << exptDesc 
+//		 	 << "_c(" << c;
+//		if (!b_baseline) sout << ")_cS(" << cS;
+//		sout << ")_ens(" << iEns << ")";
+//		string edFull = sout.str();
+
+//		p_fout[0].close();
+//		p_fout[0].open(string(dataDir + "/p_"  +edFull).c_str());
+//	}
+		
+}
+
+
+
+
+int allocArrays(){
+
+//	p_fout = new ofstream[1];
+
+//	// ~~~~~~~~~~~~~~~~ RNG ~~~~~~~~~~~~~~~~
+//	seeds_h = new int [nFish];
+//	cudaMalloc( (void**) &seeds_dev,    nFish*sizeof(int));			// seeds
+//	cudaMalloc( (void**) &dev_XWstates, nFish*sizeof(curandState));	// rng states
+
+//	// ~~~~~~~~~~~~~ state variables on GPU ~~~~~~~~~~~~~~~~~~~~~
+//	cudaMalloc( (void**) &pos_dev, nFish*sizeof(float2));			// state variables
+//	cudaMalloc( (void**) &vel_dev, nFish*sizeof(float2));
+//	cudaMalloc( (void**) &pos_dev_next, nFish*sizeof(float2));			// state variables
+//	cudaMalloc( (void**) &vel_dev_next, nFish*sizeof(float2));
+//	cudaMalloc( (void**) &Rs_dev,  nFish*sizeof(float ));
+
+//	// ~~~~~~~~~~~~~~~~~~~~~~~ Grid ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//	gridCount = new int[nCellsMax];
+//	cummCount = new int[nCellsMax];
+
+//	// alloc memory for the maximum possible size of grid
+//	cudaMalloc( (void**) &gridCount_dev,   nCellsMax*sizeof(int));
+//	cudaMalloc( (void**) &cummCount_dev,   nCellsMax*sizeof(int));
+//	cudaMalloc( (void**) &filledCount_dev, nCellsMax*sizeof(int));
+//	cudaMalloc( (void**) &pStartIds_dev,   nCellsMax*sizeof(int));
+//	cudaMalloc( (void**) &pEndIds_dev,     nCellsMax*sizeof(int));
+
+//	// alloc memory for particle properties arrays 
+//	cudaMalloc( (void**) &cellIds_dev,     nFish*sizeof(int));
+//	cudaMalloc( (void**) &sortedIds_dev,   nFish*sizeof(int));
+
+}
+
+void freeArrays(){
+
+//	// ~~~~~~~~~~~~~~~~ RNG ~~~~~~~~~~~~~~~~
+//	delete [] seeds_h;
+//	cudaFree( seeds_dev);					// seeds
+//	cudaFree( dev_XWstates);	// rng states
+
+//	// ~~~~~~~~~~~~~ state variables ~~~~~~~~~~~~~~~~~~~~~
+//	cudaFree( pos_dev);			// state variables
+//	cudaFree( vel_dev);
+//	cudaFree( pos_dev_next);			// state variables
+//	cudaFree( vel_dev_next);
+//	cudaFree( Rs_dev);
+
+//	// ~~~~~~~~~~~~~~~~~~ Grid ~~~~~~~~~~~~~~~~~~~~~~~~~
+//	delete [] gridCount;
+//	delete [] cummCount;
+
+//	cudaFree( gridCount_dev);
+//	cudaFree( filledCount_dev);
+//	cudaFree( cummCount_dev);
+//	cudaFree( cellIds_dev);
+//	cudaFree( sortedIds_dev);
+//	cudaFree( pStartIds_dev);
+//	cudaFree( pEndIds_dev);
+	
+}
+
+
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	--> read_ip_params_file()
+
+	READ INPUT PARAMS FILE
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+/*
+int initSession(Initializer &I){
+
+	outDir = I.getString("homeDir_path") + "/" + I.getString("outDir_name");
+	exptName = I.getString("exptName");
+	
+	nFish = (int) I.getScalar("particles");
+	nBlocks = 1;
+	blockSize = (int) I.getScalar("blockSize");
+
+	// graphics
+	graphicsQual = (int) I.getScalar("graphicsQual");
+	dispInterval = (int) I.getScalar("dispInterval");	
+	b_anim_on = (bool) I.getScalar("b_anim_on");
+
+	// baseline? 
+	b_baseline = I.getScalar("b_baseline");
+//	if (b_baseline) Rs_base = I.getScalar("Rs_base");	
+
+	// grouping
+	b_constRg = I.getScalar("b_constRg");
+	Rg = (b_constRg)? I.getScalar("rGroup"):-1; // if !b_constRg, set Rg = -1. This will help grouping function
+
+	// dispersal
+	rDisp = I.getScalar("rDisp");
+
+	// arena size
+	arenaSize = I.getScalar("arenaSize");		
+	moveStepsPerGen = I.getScalar("moveSteps");
+	genMax = I.getScalar("genMax");
+	
+
+	// selection
+	b = I.getScalar("b");
+	RsNoiseSd = I.getScalar("RsNoiseSd");
+
+	// init
+	fC0 = I.getScalar("fC0");
+
+	// output
+	dataOut = I.getScalar("dataOut")
+	plotsOut = I.getScalar("plotsOut");
+	framesOut = I.getScalar("framesOut");
+
+	// sweep vectors
+	c = I.getArray("c", nRuns);
+	cS = I.getArray("cS", nRuns);
+	fb_sweep  = I.getArray("Fbase");
+	rsb_sweep = I.getArray("Rs_base");
+	rg_sweep  = I.getArray("rGroup");
+	ens_sweep = I.getArray("ens");
+	mu_sweep  = I.getArray("mu", nRuns);
+	nm_sweep  = I.getArray("moveSteps", nRuns);
+
+	// errors 
+	if (host_params.kA + host_params.kO > 1) {cout << "Fatal: kA + kO = " << host_params.kA + host_params.kO << " (>1)\n"; return 1;}
+//	if (nBlocks != c.size()) {cout << "Fatal: c values (" << c.size() << ") must match the number of blocks (" << nBlocks << ")\n"; return 1;}
+//	if (nBlocks != cS.size()) {cout << "Fatal: cS values (" << cS.size() << ") must match the number of blocks (" << nBlocks << ")\n"; return 1;}
+	// since c and cS pairs will be assigned to each block, their sizes must be same as nBlocks
+
+	// no errors found. Therefore continue with setting parameters
+	
+//	printArray(&c[0], c.size(), "c");	
+//	printArray(&cS[0], cS.size(), "cS");	
+	cout << "c = " << c << "\n";
+	cout << "cS = " << cS << "\n";
+	printArray(&fb_sweep[0], fb_sweep.size(), "Base fitness");	
+//	printArray(&as_sweep[0], as_sweep.size(), "arena size");	
+	printArray(&rsb_sweep[0], rsb_sweep.size(), "rs_base");
+	printArray(&rg_sweep[0], rg_sweep.size(), "rg");
+	printArray(&ens_sweep[0], ens_sweep.size(), "ensembles");
+	printArray(&mu_sweep[0], mu_sweep.size(), "mutation rate");
+	printArray(&nm_sweep[0], nm_sweep.size(), "move steps", " ", "\n");
+	
+
+	genMax = ((genMax-1)/ngen_plot +1)*ngen_plot;
+	plotStep = genMax/ngen_plot;
+	dataDir = outDir + "/data";
+	framesDir = outDir + "/frames";
+	b_anim_on 	= (graphicsQual == 0)? true:b_anim_on;
+	nCoop = fC0*nFish;
+	b_displayEveryStep = (graphicsQual > 0) && (dispInterval < 0);	// set if display must be updated every step
+	
+	// grid
+	int cellSizeMin = 10;
+	nCellsMaxX = int(arenaSize/(cellSizeMin+1e-6))+1;
+	nCellsMax = nCellsMaxX*nCellsMaxX;
+	
+	
+
+	//initSimParams_default(host_params);
+	return 0;
+}
+
+*/
+

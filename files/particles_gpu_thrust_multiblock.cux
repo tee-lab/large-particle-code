@@ -1,0 +1,324 @@
+#include <iostream>
+#include <thrust/scan.h>
+#include <thrust/functional.h>
+#include <thrust/device_vector.h>
+#include <thrust/device_ptr.h>
+#include <thrust/fill.h>
+#include <cuda_runtime.h>
+
+#include "utils/simple_io.h"
+#include "utils/simple_timer.h"
+#include "utils/cuda_vector_math.cuh"
+
+// comparison with CPU implementation
+/* n threads	CPU	 	GPU 
+	256			0.01	0.382
+	512			0.027	0.376
+	1024		0.05	0.4
+	1024*8		0.4		0.9
+	1024*32		1.8		1.6
+	1024*64		3.5		3.5
+	1024*256	13.4	9.8	
+*/
+
+const int nFish = 8;
+const int nBlocks = 2;
+
+float arenaSize = 4;
+float Rr = 1;
+const float nCells = int(arenaSize/(Rr+1e-6))+1;
+const float cellSize = Rr;
+
+class Particle{
+	public:
+	int id;
+	int cellId;
+	float2 pos;
+	Particle(){id=-1; pos.x=0; pos.y=0;}
+	Particle(int idx, float x, float y){ id=idx; pos=make_float2(x,y); }
+};
+
+// compute exclusive prefix sum. Note that last element is truncated, but is not used in this code, so its oK. 
+void exclusive_prefix_sum(int * in, int * out, int n){
+	out[0]=0;
+	for (int i=1; i<n+1; ++i){
+		out[i] = out[i-1]+in[i-1];
+	}
+}
+
+// dummy class for emulating actual code
+struct SimParams{
+	float xmin;
+	float ymin;
+	SimParams(){xmin=ymin=0;}
+}; 
+
+void print_devArray(int * vdev, int n){
+	int * v = new int[n];
+	cudaMemcpy(v, vdev, n*sizeof(int), cudaMemcpyDeviceToHost);
+	printArray(v,n);
+	delete [] v;
+}
+
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// KERNELs to find NEAREST NEIGHBOURS using GRID
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+// given the position, get the cell ID on a square grid of dimensions nxGrid x nxGrid,
+// with each cell of size cellSize
+// this function returns cellId considering 0 for 1st grid cell. With multiple blocks, user must add appropriate offset
+//		|---|---|---|---|---|
+//		|   |   |   |   |   |
+//		|---|---|---|---|---|
+//		|   |   | x |   |   |	<-- x = (pos.x, pos.y)
+//		|---|---|---|---|---|
+//		|   |   |   |   |   |
+//		|---|---|---|---|---|
+//      ^ 0 = (xmin, ymin)	^ nx = xmin + nx*cellWidth
+
+inline  __host__ __device__ int getCellId(float2 pos, int nxGrid, int cellwidth, SimParams *s){
+	int ix = (pos.x-s->xmin)/(cellwidth+1e-6);	// add 1e-6 to make sure that particles on edge of last cell are included in that cell
+	int iy = (pos.y-s->ymin)/(cellwidth+1e-6);
+	return iy*nxGrid + ix;
+}
+
+// calculate cellID for each particle and count # particles / cell
+// while storing, full cellID is stored 
+// This kernel MUST BE launched with <<< nBlocks x nFish >>> config.
+//  ^ this constraint is kept for intuitive reasons. To remove it, use pid/np in place of blockIdx.x
+__global__ void gridCount_kernel(float2 * pos_array, int * cellId_array, int * gridCount_array, int nxGrid, int _cellSize, SimParams *s, const int np, const int nb){
+	unsigned int pid = blockIdx.x*blockDim.x + threadIdx.x;
+	
+	if (pid < np*nb){
+		int cellId_p = getCellId(pos_array[pid], nxGrid, _cellSize, s);	// get principle cell Id of particle pid
+		int cellId = ix2(cellId_p, blockIdx.x, nxGrid*nxGrid);			// grid dimension is nCells x nBlocks
+		atomicAdd(&gridCount_array[cellId],1);					// gridCount must be addressed using full cellId
+	
+		//++gridCount_array[pid];
+		cellId_array[pid] = cellId;		// cellIds array stores principle cellId
+	}
+}
+
+// rewrite particles in blockwise sorted order using results of scan
+// full particle IDs are written in sorted order
+// This kernel MUST BE launched with <<< nBlocks x nFish >>> config
+__global__ void sortParticles_kernel(int* cummCount_array, int *filledCount_array, int * cellIds_array, int *sortedIds_array, int nxGrid, const int np, const int nb){
+
+	unsigned int pid = blockIdx.x*blockDim.x + threadIdx.x;
+	
+	if (pid < np*nb){
+		int cell = cellIds_array[pid];
+		//int cell = ix2(cell_p, blockIdx.x, nxGrid*nxGrid);
+		int sortedAddress_p = cummCount_array[cell] + atomicAdd(&filledCount_array[cell],1); // atomicAdd returns old value
+		int sortedAddress = ix2(sortedAddress_p, blockIdx.x, np);	// use of blockIdx.x here necessitates launching with  <<< nBlocks x nFish >>> config
+		sortedIds_array[sortedAddress] = pid;
+	}
+}
+
+// this kernel gets the start and end ids of particles in each grid cell. 
+// Hence it must be run using 1 thread for each grid cell = nBlocks*nCells threads
+// startId and endId arrays store full particle IDs. 
+// This kernel MUST BE launched with <<< nBlocks x nFish >>> config
+__global__ void getParticleIds_kernel(int * pStartIds_array, int* pEndIds_array, int * cellIds_array, int* cummCount_array, int* gridCount_array, const int np, const int nb){
+	unsigned int pid = blockIdx.x*blockDim.x + threadIdx.x;
+
+	if (pid < np*nb){
+		int gid = cellIds_array[pid];		// full pid automatically gives full gid
+		int count = gridCount_array[gid];	// number of particles in cell gid
+		int scan = cummCount_array[gid];	// cummulative number of particles till cell gid in block blockIdx.x
+		
+		int startId = scan*float(count!=0) + -1*float(count==0);	// if count is zero, set startId to -1
+		int endId = startId + count-1;	// if count is zero, this will become -2. This is FINE.
+
+		pStartIds_array[gid] = ix2(startId, blockIdx.x, np);
+		pEndIds_array[gid]   = ix2(  endId, blockIdx.x, np);
+	}
+}
+
+
+
+int main(){
+
+	const int N = nCells * nCells * nBlocks;
+	cout << "Grid size = " << N << '\n' << "threads = " << nFish << '\n';
+
+	int * gridCount = new int[N];
+	int * cummCount = new int[N];
+	int * filledCount = new int[N];
+	int * nnStartIds = new int[N];
+	int * nnEndIds = new int[N];
+
+	int * sortedIds = new int[nFish*nBlocks];
+//	int * pIds = new int[nFish];
+	int * cellIds = new int[nFish*nBlocks];
+
+	for (int i=0; i<N; ++i){
+		cummCount[i] = filledCount[i] = 0;
+	}
+
+	Particle * p = new Particle[nFish*nBlocks];
+	p[0] = Particle(0, 2.7, 1.7);
+	p[1] = Particle(1, 2.5, 1.5);
+	p[2] = Particle(2, 2.5, 0.5);
+	p[3] = Particle(3, 0.5, 0.8);
+	p[4] = Particle(4, 1.5, 3.5);
+	p[5] = Particle(5, 3.7, 1.5);
+	p[6] = Particle(6, 1.5, 2.5);
+	p[7] = Particle(7, 0.2, 0.2);
+
+	p[8+0] = Particle(0, 1.5, 0.5);
+	p[8+1] = Particle(1, 2.5, 2.5);
+	p[8+2] = Particle(2, 1.5, 2.5);
+	p[8+3] = Particle(3, 3.5, 0.5);
+	p[8+4] = Particle(4, 1.5, 2.5);
+	p[8+5] = Particle(5, 3.5, 3.5);
+	p[8+6] = Particle(6, 1.5, 1.5);
+	p[8+7] = Particle(7, 3.5, 3.5);
+
+//	printArray(gridCount, N, "gridCount");
+//	printArray(filledCount, N, "filledCount");
+//	printArray(sortedIds, N, "sortedIds");
+//	printArray(cummCount, N, "cummCount");
+
+	int * gridCount_dev, *cellIds_dev;
+	float2 * pos_dev;
+	cudaMalloc((void**)&pos_dev, nFish*nBlocks*sizeof(float2));
+	cudaMalloc((void**)&cellIds_dev, nFish*nBlocks*sizeof(int));
+	cudaMalloc((void**)&gridCount_dev, (N)*sizeof(int));
+	int * cummCount_dev, *filledCount_dev, *sortedIds_dev;
+	cudaMalloc((void**)&cummCount_dev, (N)*sizeof(int));
+	cudaMalloc((void**)&filledCount_dev, N*sizeof(int));
+	cudaMalloc((void**)&sortedIds_dev, nFish*nBlocks*sizeof(int));
+	int * nnStartIds_dev, *nnEndIds_dev;
+	cudaMalloc((void**)&nnStartIds_dev, N*sizeof(int));
+	cudaMalloc((void**)&nnEndIds_dev, N*sizeof(int));
+
+	// copy positions to device - not necessary in main code
+	//             v dst           v dst pitch     v src               v src pitch       v bytes/elem    v n_elem       v direction
+	cudaMemcpy2D( (void*) pos_dev, sizeof(float2), (void*)&(p[0].pos), sizeof(Particle), sizeof(float2), nFish*nBlocks, cudaMemcpyHostToDevice);
+
+	SimParams * host_params = new SimParams;
+	SimParams * dev_params;
+
+	cudaMalloc( (void**) &dev_params, sizeof(SimParams));					// sim params
+	cudaMemcpy( dev_params, &host_params, sizeof(SimParams), cudaMemcpyHostToDevice);
+	
+	SimpleTimer s; s.reset();
+	s.start();
+
+//	thrust::device_ptr <int> dev_array;
+//	
+//	dev_array = (thrust::device_ptr <int>)gridCount_dev; 
+	thrust::fill((thrust::device_ptr <int>)gridCount_dev, (thrust::device_ptr <int>)gridCount_dev+N, (int)0);
+	thrust::fill((thrust::device_ptr <int>)filledCount_dev, (thrust::device_ptr <int>)filledCount_dev+N, (int)0);
+//	setZero_kernel <<<nBlocks, nFish>>> (filledCount_dev, nFish*nBlocks);
+//	cudaMemcpy(gridCount_dev, gridCount, N*sizeof(int), cudaMemcpyHostToDevice);
+//	cudaMemcpy(cellIds_dev, cellIds, nFish*nBlocks*sizeof(int), cudaMemcpyHostToDevice);
+
+	print_devArray(gridCount_dev, N);
+	gridCount_kernel <<<nBlocks, nFish >>> (pos_dev, cellIds_dev, gridCount_dev, nCells, cellSize, dev_params, nFish, nBlocks);
+
+	print_devArray(cellIds_dev, nFish*nBlocks);
+	print_devArray(gridCount_dev, N);
+
+	// scan
+//	cudaMemcpy(gridCount, gridCount_dev, N*sizeof(int), cudaMemcpyDeviceToHost);
+//	exclusive_prefix_sum(gridCount, cummCount, 16);
+//	cudaMemcpy(cummCount_dev, cummCount, N*sizeof(int), cudaMemcpyHostToDevice);
+	int ng = nCells*nCells;
+	for (int iblock=0; iblock<nBlocks; ++iblock){
+		thrust::device_ptr <int> v_in  = (thrust::device_ptr <int>) &gridCount_dev[ix2(0,iblock,ng)];
+		thrust::device_ptr <int> v_out = (thrust::device_ptr <int>) &cummCount_dev[ix2(0,iblock,ng)];
+		thrust::exclusive_scan(v_in, v_in+ng, v_out);
+	}
+
+	print_devArray(cummCount_dev, N);
+	
+//	setZero_kernel <<<nBlocks, nFish>>> (filledCount_dev, nFish*nBlocks);
+//	cudaMemcpy(filledCount_dev, filledCount, N*sizeof(int), cudaMemcpyHostToDevice);
+
+	sortParticles_kernel <<<nBlocks, nFish >>> (cummCount_dev, filledCount_dev, cellIds_dev, sortedIds_dev, nCells, nFish, nBlocks);
+
+	print_devArray(sortedIds_dev, nFish*nBlocks);
+
+	thrust::fill((thrust::device_ptr <int>)nnStartIds_dev, (thrust::device_ptr <int>)nnStartIds_dev+N, (int)-1);
+	thrust::fill((thrust::device_ptr <int>)nnEndIds_dev, (thrust::device_ptr <int>)nnEndIds_dev+N, (int)-2);
+	getParticleIds_kernel <<<nBlocks, nFish >>>(nnStartIds_dev, nnEndIds_dev, cellIds_dev, cummCount_dev, gridCount_dev, nFish, nBlocks);
+
+	print_devArray(nnStartIds_dev, N);
+	print_devArray(nnEndIds_dev, N);
+
+
+	s.stop();
+	cout << "GPU time = " << s.getTime() << " ms\n"; 
+	
+/*
+
+	// parallelize
+	// sort particles
+//	for (int i=0; i<nFish; ++i){
+//		int cell = cellIds[i];
+//		int sortedAddress = cummCount[cell]+filledCount[cell];
+//		sortedIds[sortedAddress] = i;
+//		++filledCount[cell];
+//	}	
+
+	// copy gridCounts and cellIds to host
+	cudaMemcpy(cellIds, cellIds_dev, nFish*nBlocks*sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(gridCount, gridCount_dev, (N)*sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(cummCount, cummCount_dev, (N)*sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(nnStartIds, nnStartIds_dev, N*sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(nnEndIds, nnEndIds_dev, N*sizeof(int), cudaMemcpyDeviceToHost);
+
+	// parallelize - DONE
+	// calculate cell Id and grid count using atomics
+	for (int i=0; i< nFish; ++i){
+//		cellIds[i] = getCellId(p[i].pos, nCells, cellSize);
+		cout << i << ", " << cellIds[i] << '\n';
+//		++gridCount[cellIds[i]];
+	}
+
+	printArray(gridCount, N, "gridCount");
+	printArray(cummCount, N, "cummCount");
+
+	cudaMemcpy(sortedIds, sortedIds_dev, nFish*nBlocks*sizeof(int), cudaMemcpyDeviceToHost);
+
+	cout << "NN:\n";
+	for (int i=0; i< N; ++i){
+//		cellIds[i] = getCellId(p[i].pos, nCells, cellSize);
+		cout << i << ", " << nnStartIds[i] << ", " << nnEndIds[i] << '\n';
+//		++gridCount[cellIds[i]];
+	}
+	
+
+	printArray(sortedIds, nFish, "sortedIds");
+
+	// run kernel
+*/	
+
+
+//	int data[N], data_out[N+1];
+//	for (int i=0; i<N; ++i) data[i]=1;
+
+////	printArray(data,N);	
+//	
+//	SimpleTimer s; s.reset();
+//	s.start();
+//	exclusive_prefix_sum(data,data_out, N);
+//	s.stop();
+//	cout << "CPU time = " << s.getTime() << " ms\n"; 
+//	
+////	printArray(data_out, N+1);	
+//	
+//	SimpleTimer s1; s1.reset();
+//	s1.start();
+//	thrust::exclusive_scan(data, data+N, data);
+//	s1.stop();
+//	cout << "GPU time = " << s1.getTime() << " ms\n"; 
+//	
+////	printArray(data,N);	
+//	
+	
+}
+
+
