@@ -17,6 +17,7 @@
 // includes, system
 #include <ctime>
 #include <sys/time.h>
+#include <iostream>
 using namespace std;
 
 //! Windows specific implementation of StopWatch
