@@ -6,6 +6,7 @@
 using namespace std;
 
 //cudaError __host__ copyParamsToDevice();
+//comment for github practice - aakanksha
 
 void ParticleSystem::printParticles(int n){
 	if (n > pvec.size()) n = pvec.size();
