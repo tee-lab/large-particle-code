@@ -1,3 +1,4 @@
+//Jitesh
 #include <iostream>
 #include <curand.h>
 #include <cstdlib>
